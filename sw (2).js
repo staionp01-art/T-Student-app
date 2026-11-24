@@ -1,0 +1,4 @@
+const C="ts-v16",A=["./","T-Student.html","splash.js","icon-192.png","icon-512.png","icon-maskable-512.png","apple-touch-icon.png","rain.b64","manifest.json","icon.svg","https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js","https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"];
+self.addEventListener("install",e=>e.waitUntil(caches.open(C).then(c=>Promise.all(A.map(u=>c.add(u).catch(()=>{})))).then(()=>self.skipWaiting())));
+self.addEventListener("activate",e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>clients.claim())));
+self.addEventListener("fetch",e=>{const r=e.request;if(r.method!=="GET")return;e.respondWith(fetch(r).then(n=>{if(n.ok&&(r.url.startsWith(self.location.origin)||/googleapis|gstatic|cdnjs/.test(r.url))){const c=n.clone();caches.open(C).then(x=>x.put(r,c))}return n}).catch(()=>caches.match(r).then(h=>h||caches.match("T-Student.html"))))});
