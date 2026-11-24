@@ -1,0 +1,175 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_ID: com.staionp01.tstudent
+  APP_NAME: T-Student
+  WEB_REPO: staionp01-art/T-Student
+  KS_PASS: tstudent-ks-2026
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Fetch the web app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WEB_REPO }}
+          path: web
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Prepare www
+        run: |
+          mkdir -p www
+          cp web/T-Student.html www/index.html
+          cp web/T-Student.html www/T-Student.html
+          cp web/splash.js web/sw.js web/manifest.json web/icon.svg www/
+          cp web/*.png www/
+
+      - name: Capacitor config
+        run: |
+          cat > capacitor.config.json << 'JSON'
+          {
+            "appId": "com.staionp01.tstudent",
+            "appName": "T-Student",
+            "webDir": "www",
+            "server": { "url": "https://staionp01-art.github.io/T-Student/T-Student.html", "androidScheme": "https" },
+            "plugins": {
+              "SocialLogin": {
+                "providers": { "google": true, "facebook": false, "apple": false, "twitter": false }
+              }
+            }
+          }
+          JSON
+
+      - name: Install Capacitor and add Android
+        run: |
+          npm init -y
+          npm install @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8 @capgo/capacitor-social-login@8 @capacitor/local-notifications@8
+          npx cap add android
+          npx cap sync android
+
+      - name: Patch MainActivity for Google sign-in
+        run: |
+          F=$(find android -name MainActivity.java | head -n 1)
+          echo "MainActivity: $F"
+          cat > "$F" << 'JAVA'
+          package com.staionp01.tstudent;
+
+          import ee.forgr.capacitor.social.login.GoogleProvider;
+          import ee.forgr.capacitor.social.login.SocialLoginPlugin;
+          import ee.forgr.capacitor.social.login.ModifiedMainActivityForSocialLoginPlugin;
+          import com.getcapacitor.PluginHandle;
+          import com.getcapacitor.Plugin;
+          import android.content.Intent;
+          import android.util.Log;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity implements ModifiedMainActivityForSocialLoginPlugin {
+
+              @Override
+              public void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+
+                  if (requestCode >= GoogleProvider.REQUEST_AUTHORIZE_GOOGLE_MIN && requestCode < GoogleProvider.REQUEST_AUTHORIZE_GOOGLE_MAX) {
+                      PluginHandle pluginHandle = getBridge().getPlugin("SocialLogin");
+                      if (pluginHandle == null) {
+                          Log.i("Google Activity Result", "SocialLogin login handle is null");
+                          return;
+                      }
+                      Plugin plugin = pluginHandle.getInstance();
+                      if (!(plugin instanceof SocialLoginPlugin)) {
+                          Log.i("Google Activity Result", "SocialLogin plugin instance is not SocialLoginPlugin");
+                          return;
+                      }
+                      ((SocialLoginPlugin) plugin).handleGoogleLoginIntent(requestCode, data);
+                  }
+              }
+
+              @Override
+              public void IHaveModifiedTheMainActivityForTheUseWithSocialLoginPlugin() {}
+          }
+          JAVA
+
+      - name: App icons
+        continue-on-error: true
+        run: |
+          RES=android/app/src/main/res
+          rm -rf $RES/mipmap-anydpi-v26
+          for d in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+            set -- $d
+            mkdir -p $RES/mipmap-$1
+            convert web/icon-512.png -resize ${2}x${2} $RES/mipmap-$1/ic_launcher.png
+            cp $RES/mipmap-$1/ic_launcher.png $RES/mipmap-$1/ic_launcher_round.png
+            rm -f $RES/mipmap-$1/ic_launcher_foreground.png
+          done
+
+      - name: Signing key (created once, then reused)
+        run: |
+          if [ ! -f t-student.jks ]; then
+            keytool -genkeypair -v -keystore t-student.jks -alias tstudent \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -dname "CN=T-Student, O=T-Student, C=SA"
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add t-student.jks
+            git commit -m "Add signing keystore"
+            git push
+          fi
+          cp t-student.jks android/app/t-student.jks
+          cat >> android/app/build.gradle << GRADLE
+
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("t-student.jks")
+                      storePassword "$KS_PASS"
+                      keyAlias "tstudent"
+                      keyPassword "$KS_PASS"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Show package name and SHA-1
+        run: |
+          {
+            echo "## Package name"
+            echo "\`$APP_ID\`"
+            echo "## SHA-1"
+            keytool -list -v -keystore t-student.jks -alias tstudent -storepass "$KS_PASS" | grep -E "SHA1|SHA-1"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: T-Student-APK
+          path: android/app/build/outputs/apk/release/*.apk
