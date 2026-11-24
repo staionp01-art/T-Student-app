@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 't-student-web.zip'
+      - 't-student-web*.zip'
       - '.github/workflows/build.yml'
 
 permissions:
@@ -34,7 +34,10 @@ jobs:
       - name: Unpack and stamp version
         run: |
           mkdir -p site
-          unzip -o -j t-student-web.zip -d site
+          ZIP=$(ls -t t-student-web*.zip 2>/dev/null | head -n 1)
+          [ -n "$ZIP" ] || { echo "::error::no t-student-web*.zip found in repo root"; exit 1; }
+          echo "Using: $ZIP"
+          unzip -o -j "$ZIP" -d site
           test -f site/T-Student.html || { echo "::error::T-Student.html not found in zip"; exit 1; }
           # رقم نسخة جديد في كل رفع => المتصفح يكتشف التحديث ويظهر الشريط
           sed -i "s/const C=\"[^\"]*\"/const C=\"ts-b${{ github.run_number }}\"/" site/sw.js
@@ -67,9 +70,10 @@ jobs:
       - name: Unpack web app (from t-student-web.zip)
         run: |
           mkdir -p web
-          if [ -f t-student-web.zip ]; then
-            echo "Using t-student-web.zip"
-            unzip -o -j t-student-web.zip -d web
+          ZIP=$(ls -t t-student-web*.zip 2>/dev/null | head -n 1)
+          if [ -n "$ZIP" ]; then
+            echo "Using $ZIP"
+            unzip -o -j "$ZIP" -d web
           else
             echo "No zip found, using loose files from repo root"
             cp T-Student.html splash.js sw.js manifest.json icon.svg rain.b64 web/ 2>/dev/null || true
