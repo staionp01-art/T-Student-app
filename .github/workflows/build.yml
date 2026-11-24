@@ -1,7 +1,12 @@
 name: Build Android APK
 
+# يشتغل تلقائياً عند رفع t-student-web.zip (أو تعديل هذا الملف)، ويدوياً من تبويب Actions
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 't-student-web.zip'
+      - '.github/workflows/build.yml'
 
 permissions:
   contents: write
@@ -9,21 +14,46 @@ permissions:
 env:
   APP_ID: com.staionp01.tstudent
   APP_NAME: T-Student
-  WEB_REPO: staionp01-art/T-Student
   KS_PASS: tstudent-ks-2026
+  # يُحسب تلقائياً من اسم المستودع (GitHub Pages) ويجعل التطبيق يفتح موقعك مباشرة
+  # فتصل التحديثات لكل المستخدمين بزر "حدّث الآن" بدون إعادة تثبيت APK
 
 jobs:
+  pages:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack and stamp version
+        run: |
+          mkdir -p site
+          unzip -o -j t-student-web.zip -d site
+          test -f site/T-Student.html || { echo "::error::T-Student.html not found in zip"; exit 1; }
+          # رقم نسخة جديد في كل رفع => المتصفح يكتشف التحديث ويظهر الشريط
+          sed -i "s/const C=\"[^\"]*\"/const C=\"ts-b${{ github.run_number }}\"/" site/sw.js
+          cp site/T-Student.html site/index.html
+          grep -o 'const C="[^"]*"' site/sw.js
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
   build:
+    needs: pages
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout this repo
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Fetch the web app
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.WEB_REPO }}
-          path: web
 
       - uses: actions/setup-node@v4
         with:
@@ -34,29 +64,49 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - name: Unpack web app (from t-student-web.zip)
+        run: |
+          mkdir -p web
+          if [ -f t-student-web.zip ]; then
+            echo "Using t-student-web.zip"
+            unzip -o -j t-student-web.zip -d web
+          else
+            echo "No zip found, using loose files from repo root"
+            cp T-Student.html splash.js sw.js manifest.json icon.svg rain.b64 web/ 2>/dev/null || true
+            cp ./*.png web/ 2>/dev/null || true
+          fi
+          if [ ! -f web/T-Student.html ]; then
+            echo "::error::T-Student.html not found (zip is empty or has the wrong files)"
+            exit 1
+          fi
+          ls -la web
+
       - name: Prepare www
         run: |
           mkdir -p www
+          cp web/* www/
           cp web/T-Student.html www/index.html
-          cp web/T-Student.html www/T-Student.html
-          cp web/splash.js web/sw.js web/manifest.json web/icon.svg www/
-          cp web/*.png www/
+
+      - name: Live URL (GitHub Pages)
+        run: |
+          OWNER=$(echo "${GITHUB_REPOSITORY%%/*}" | tr 'A-Z' 'a-z')
+          REPO="${GITHUB_REPOSITORY#*/}"
+          echo "LIVE_URL=https://$OWNER.github.io/$REPO/" >> "$GITHUB_ENV"
 
       - name: Capacitor config
         run: |
-          cat > capacitor.config.json << 'JSON'
-          {
-            "appId": "com.staionp01.tstudent",
-            "appName": "T-Student",
-            "webDir": "www",
-            "server": { "url": "https://staionp01-art.github.io/T-Student/T-Student.html", "androidScheme": "https" },
-            "plugins": {
-              "SocialLogin": {
-                "providers": { "google": true, "facebook": false, "apple": false, "twitter": false }
-              }
-            }
-          }
-          JSON
+          node -e '
+            const c = {
+              appId: process.env.APP_ID,
+              appName: process.env.APP_NAME,
+              webDir: "www",
+              server: { androidScheme: "https" },
+              plugins: { SocialLogin: { providers: { google: true, facebook: false, apple: false, twitter: false } } }
+            };
+            if (process.env.LIVE_URL) c.server.url = process.env.LIVE_URL;
+            require("fs").writeFileSync("capacitor.config.json", JSON.stringify(c, null, 2));
+          '
+          cat capacitor.config.json
 
       - name: Install Capacitor and add Android
         run: |
@@ -111,11 +161,15 @@ jobs:
         continue-on-error: true
         run: |
           RES=android/app/src/main/res
+          SRC=web/icon-512.png
+          [ -f "$SRC" ] || SRC=web/icon-maskable-512.png
+          [ -f "$SRC" ] || SRC=web/icon-192.png
+          echo "Icon source: $SRC"
           rm -rf $RES/mipmap-anydpi-v26
           for d in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
             set -- $d
             mkdir -p $RES/mipmap-$1
-            convert web/icon-512.png -resize ${2}x${2} $RES/mipmap-$1/ic_launcher.png
+            convert "$SRC" -resize ${2}x${2} $RES/mipmap-$1/ic_launcher.png
             cp $RES/mipmap-$1/ic_launcher.png $RES/mipmap-$1/ic_launcher_round.png
             rm -f $RES/mipmap-$1/ic_launcher_foreground.png
           done
@@ -159,6 +213,11 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
+      - name: Name the APK
+        run: |
+          cp android/app/build/outputs/apk/release/*.apk T-Student.apk
+          ls -la T-Student.apk
+
       - name: Show package name and SHA-1
         run: |
           {
@@ -168,8 +227,15 @@ jobs:
             keytool -list -v -keystore t-student.jks -alias tstudent -storepass "$KS_PASS" | grep -E "SHA1|SHA-1"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload APK
+      - name: Upload APK (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: T-Student-APK
-          path: android/app/build/outputs/apk/release/*.apk
+          path: T-Student.apk
+
+      - name: Publish APK in Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: T-Student build ${{ github.run_number }}
+          files: T-Student.apk
